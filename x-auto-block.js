@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Twitter/X 纯本地规则拉黑机器人 (零延迟升级版)
 // @namespace    http://tampermonkey.net/
-// @version      7.2
-// @description  摒弃AI，使用极速的本地正则规则判定并拉黑推特黄推和引流号，专门针对同音字变种和多行纯表情刷屏优化。
+// @version      7.3
+// @description  摒弃AI，使用极速的本地正则规则判定并拉黑推特黄推和引流号，增加批量ID特征检测和垂直多行表情防刷屏。
 // @author       You
 // @match        *://x.com/*
 // @match        *://twitter.com/*
@@ -108,15 +108,15 @@
   // 3. 本地判定规则引擎 (全面重构升级版)
   // --------------------------------------------------------
   class LocalRuleEngine {
-    static isBot(displayName, textContent) {
+    // 注意：这里新增了传入 screenName (即 @ 用户名) 参数
+    static isBot(displayName, screenName, textContent) {
       const trimmedText = textContent.trim();
-      const strippedText = trimmedText.replace(/[\s\p{Z}\p{Cf}]/gu, '');
 
       // ==========================================
       // 规则 1：高危账号名称拦截
       // ==========================================
-      // 优化：补充了“全城”、以及“约”字的多种同音/拼音变体（炮/泡/萢/拍/p/P）
-      const nameSpamRegex = /(?:点(?:击)?|看)(?:主页|头像|置顶)|主页自取|进群选人|资源(?:入口)?|找炮友|约(?:炮|泡|萢|拍|p|P|见|妹)|破处|裸聊|福利姬|母狗|找主人|真实可靠|门槛|同城|全城|面付|外围|空降|品茶|修车|留[联连]系|原味|探花|楼凤|伴游|互粉|互关|互fo|fo back|秒回|赌场|澳门|娱乐城|百家乐|[加➕][Vv微威]|vx|威信|Q群|TG群|全国[1-9]线|附近(?:好友|真实)|无偿(?:线下|约)|处男(?:免费)?|免费破处/i;
+      // 新增黑词：固炮、涩播、准时播等变异引流词
+      const nameSpamRegex = /(?:点(?:击)?|看)(?:主页|头像|置顶)|主页自取|进群选人|资源(?:入口)?|找炮友|固炮|约(?:炮|泡|萢|拍|p|P|见|妹)|破处|裸聊|福利姬|母狗|找主人|真实可靠|门槛|同城|全城|面付|外围|空降|品茶|修车|留[联连]系|原味|探花|楼凤|伴游|互粉|互关|互fo|fo back|秒回|赌场|澳门|娱乐城|百家乐|[加➕][Vv微威]|vx|威信|Q群|TG群|全国[1-9]线|附近(?:好友|真实)|无偿(?:线下|约)|处男(?:免费)?|免费破处|涩播|准时.*播/i;
       if (nameSpamRegex.test(displayName)) {
         return true;
       }
@@ -125,7 +125,7 @@
         // ==========================================
         // 规则 2：高危正文内容拦截
         // ==========================================
-        const textSpamRegex = /主页有惊喜|看我主页|看主页|看置顶|加[Vv微信]{1,2}看|门槛.*[红包|付费]|全网最[低全]|同城|全城|约(?:炮|泡|萢|拍|p|P)|裸聊|福利姬|🔞|💦/i;
+        const textSpamRegex = /主页有惊喜|看我主页|看主页|看置顶|加[Vv微信]{1,2}看|门槛.*[红包|付费]|全网最[低全]|同城|全城|固炮|约(?:炮|泡|萢|拍|p|P)|裸聊|福利姬|涩播|🔞|💦/i;
         if (textSpamRegex.test(trimmedText)) {
           return true;
         }
@@ -143,24 +143,24 @@
         }
 
         // ==========================================
-        // 规则 4 & 5：无意义短文本 / 纯表情变种专杀
+        // 规则 4 & 5：无意义短文本 / 纯表情刷屏专杀
         // ==========================================
-        // 判断文本中是否包含任何标准的英文字母或汉字
-        const hasLetterOrCJK = /[a-zA-Z\u4e00-\u9fa5]/.test(trimmedText);
+        // 使用 \p{L} 匹配任意人类语言文字，防止机器人用非中英文字符(如假名、俄文)绕过
+        const hasAnyLetter = /[\p{L}]/u.test(trimmedText);
 
-        if (!hasLetterOrCJK) {
-          // 这种情况说明回复全是表情、符号、数字或不可见字符
+        if (!hasAnyLetter) {
+          // 如果一条回复里一个正常文字都没有（全是符号、表情或数字）
 
-          // 1. 如果包含数字（针对 "🚀💎6" 变种）
+          // 1. 包含数字直接拉黑 (针对 💐2🌸)
           if (/\d/.test(trimmedText)) return true;
 
-          // 2. 如果包含换行多行排版（针对截图中的 "🎠\n🎠 🎢\n🎠" 变种）
-          // 正常用户极少会刻意将纯表情分成多行来回复
-          const lineCount = trimmedText.split(/\r\n|\r|\n/).length;
-          if (lineCount >= 2) return true;
+          // 2. 垂直多行表情占屏 (针对 🌈🌹\n\n🔥\n\n🦄)
+          const lines = trimmedText.split(/\n/);
+          const nonEmptyLines = lines.filter(line => line.trim().length > 0).length;
+          // 如果跨越3行及以上，或存在2个及以上的独立内容行（正常人连发表情不会故意每发一个按一次回车）
+          if (lines.length >= 3 || nonEmptyLines >= 2) return true;
 
-          // 3. 防修饰符/零宽字符变种
-          // 剥离所有的空白符、排版控制符(\p{C})和变音修饰符(\p{M})，如果发现什么可视内容都没了，杀掉
+          // 3. 防修饰符变种 (剥离可视字符后为空)
           const visibleOnly = trimmedText.replace(/[\s\p{Z}\p{C}\p{M}]/gu, '');
           if (visibleOnly.length === 0) return true;
 
@@ -170,13 +170,24 @@
           // ==========================================
           const hasEmojiAny = /[\p{Extended_Pictographic}\p{Emoji_Presentation}\p{Emoji}]/u.test(trimmedText);
           if (hasEmojiAny) {
-            // 移除所有标点、符号、表情和空白
             const pureText = trimmedText.replace(/[\s\p{Z}\p{C}\p{M}\p{Extended_Pictographic}\p{Emoji_Presentation}\p{Emoji}\p{Symbol}\p{Punctuation}]/gu, '');
-            // 如果仅剩下极其微量的英文字母，且没有汉字
             const hasCJK = /[\u4e00-\u9fa5]/.test(pureText);
             if (!hasCJK && pureText.length > 0 && pureText.length <= 4) {
               return true;
             }
+          }
+        }
+
+        // ==========================================
+        // 规则 7：机器批量注册 ID 特征交叉验证 (新必杀)
+        // ==========================================
+        // 特征：Handle(ID) 为较长的英文字母组合，且结尾紧跟 4~6 位纯数字 (如 GarciaJose97449)
+        const isBotHandlePattern = /[a-zA-Z]{6,}\d{4,6}$/.test(screenName);
+        if (isBotHandlePattern) {
+          // 如果是这种机器批量特征账号，且回复里连一个正常文字都没有（或者极短），直接击杀
+          // 这能覆盖所有仅发单行单一表情绕过前面规则的批量账号
+          if (!hasAnyLetter) {
+            return true;
           }
         }
       }
@@ -250,7 +261,8 @@
         const screenName = screenNameMatch[1];
         const textContent = textElement ? textElement.innerText : "";
 
-        if (LocalRuleEngine.isBot(displayName, textContent)) {
+        // 将提取到的 screenName(即不带@的ID) 一并传给引擎进行批量号特征判定
+        if (LocalRuleEngine.isBot(displayName, screenName, textContent)) {
           tweet.style.transition = 'opacity 0.3s ease';
           tweet.style.opacity = '0';
           setTimeout(() => { tweet.style.display = 'none'; }, 300);
