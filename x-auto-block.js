@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Twitter/X 纯本地规则拉黑机器人 (零延迟升级版)
 // @namespace    http://tampermonkey.net/
-// @version      7.4
-// @description  使用本地正则规则判定并拉黑推特黄推和引流号，优化单字伪装表情刷屏检测，增强机器ID交叉验证。
+// @version      7.6
+// @description  使用本地正则规则判定并拉黑推特黄推和引流号，修复离散字母填充伪装（如 o v v, H j G）变种，扩充词库。
 // @author       You
 // @match        *://x.com/*
 // @match        *://twitter.com/*
@@ -113,8 +113,8 @@
       // ==========================================
       // 规则 1：高危账号名称拦截
       // ==========================================
-      // 直接测试包含名字和ID的完整元素文本，防止过长名字被DOM截断导致漏判
-      const nameSpamRegex = /(?:点(?:击)?|看)(?:主页|头像|置顶)|主页自取|进群选人|资源(?:入口)?|找炮友|固炮|约(?:炮|泡|萢|拍|跑|p|P|见|妹)|破处|裸聊|福利姬|母狗|找主人|真实可靠|门槛|同城|全城|面付|外围|空降|品茶|修车|留[联连]系|原味|探花|楼凤|伴游|互粉|互关|互fo|fo back|秒回|赌场|澳门|娱乐城|百家乐|[加➕][Vv微威]|vx|威信|Q群|TG群|全国[1-9]线|附近(?:好友|真实)|无偿|处男|chu男|免费破|24h/i;
+      // 补充调教、一对一等新型引流词
+      const nameSpamRegex = /(?:点(?:击)?|看)(?:主页|头像|置顶)|主页自取|进群选人|资源(?:入口)?|找炮友|固炮|约(?:炮|泡|萢|拍|跑|p|P|见|妹)|破处|裸聊|福利姬|母狗|找?主人|真实可靠|门槛|同城|全城|面付|外围|空降|品茶|修车|留[联连]系|原味|探花|楼凤|伴游|互粉|互关|互fo|fo back|秒回|赌场|澳门|娱乐城|百家乐|[加➕][Vv微威]|vx|威信|Q群|TG群|全国[1-9]线|附近(?:好友|真实)|无偿|处男|chu男|免费破|24h|求报复|反差|绿帽|出轨|主奴|主人.*领我|调教|一对一/i;
       if (nameSpamRegex.test(userNameContent)) {
         return true;
       }
@@ -123,7 +123,8 @@
         // ==========================================
         // 规则 2：高危正文内容拦截
         // ==========================================
-        const textSpamRegex = /主页有惊喜|看我主页|看主页|看置顶|加[Vv微信]{1,2}看|门槛.*[红包|付费]|全网最[低全]|同城|全城|固炮|约(?:炮|泡|萢|拍|跑|p|P)|裸聊|福利姬|涩播|🔞|💦/i;
+        // 补充在线等、小狗、调教等
+        const textSpamRegex = /主页有惊喜|看我主页|看主页|看置顶|加[Vv微信]{1,2}看|门槛.*[红包|付费]|全网最[低全]|同城|全城|固炮|约(?:炮|泡|萢|拍|跑|p|P)|裸聊|福利姬|涩播|求报复|主人快来|快来领我|在线等|小狗|调教|🔞|💦/i;
         if (textSpamRegex.test(trimmedText)) {
           return true;
         }
@@ -166,7 +167,20 @@
         }
 
         // ==========================================
-        // 规则 5：乱码+表情 防屏蔽变种 (如 "K 14 n 🌸")
+        // 规则 5：离散字母填充伪装 (针对 "o v v", "H j G")
+        // ==========================================
+        // 匹配连续出现3个以上单字母加空格的模式，这是引流号撑长文本绕过字数检测的新手段
+        const hasIsolatedLetters = /(?:[a-zA-Z]\s+){2,}[a-zA-Z]/.test(trimmedText);
+        if (hasIsolatedLetters && hasEmoji) return true;
+
+        // ==========================================
+        // 规则 6：机器账号短句放宽检测
+        // ==========================================
+        // 如果是批量生成的机器ID，有效文字在10个字以内并配有表情，大概率是短句诱导变种
+        if (isBotHandlePattern && pureText.length <= 10 && hasEmoji) return true;
+
+        // ==========================================
+        // 规则 7：乱码+表情 防屏蔽变种 (如 "K 14 n 🌸")
         // ==========================================
         if (pureText.length > 0 && pureText.length <= 4) {
           const hasCJK = /[\u4e00-\u9fa5]/.test(pureText);
@@ -187,6 +201,8 @@
     constructor() {
       // 加载本地存储的队列，防止刷新页面导致未拉黑的任务丢失
       this.blockQueue = this.loadQueue();
+      // 在内存中维护一份已知黑名单集合，应对 React 节点复用问题
+      this.knownBots = new Set(this.blockQueue);
       this.isQueueRunning = false;
 
       // 注入用于彻底隐藏元素的全局CSS
@@ -257,17 +273,26 @@
         const textElement = tweet.querySelector('[data-testid="tweetText"]');
         const textContent = textElement ? textElement.innerText : "";
 
-        // 生成推文特征码，防止 Twitter 的 React 虚拟列表复用 DOM 节点导致判定失效
+        // 核心修复点 1：拦截内存中已知的黑名单ID，即使 React 刷新了样式，也强制重新隐藏它
+        if (this.knownBots.has(screenName)) {
+          if (!tweet.classList.contains('bot-blocker-hidden')) {
+            tweet.classList.add('bot-blocker-hidden');
+          }
+          continue;
+        }
+
+        // 生成推文特征码，用于防止对正常推文进行多余验证
         const signature = screenName + "|" + textContent.length;
         if (tweet.dataset.botSignature === signature) continue;
 
         tweet.dataset.botSignature = signature;
 
-        // 每次重新评估新的节点时，先移除隐藏类，防止正常推文被复用隐藏
+        // 核心修复点 2：在非黑名单状态下，重置隐藏类，防止正常推文误用节点缓存的样式
         tweet.classList.remove('bot-blocker-hidden');
 
         if (LocalRuleEngine.isBot(userNameContent, screenName, textContent)) {
           tweet.classList.add('bot-blocker-hidden');
+          this.knownBots.add(screenName);
 
           if (!this.blockQueue.includes(screenName)) {
             this.blockQueue.push(screenName);
