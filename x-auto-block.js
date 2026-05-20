@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Twitter/X 纯本地规则拉黑机器人 (零延迟升级版)
 // @namespace    http://tampermonkey.net/
-// @version      7.3
-// @description  摒弃AI，使用极速的本地正则规则判定并拉黑推特黄推和引流号，增加批量ID特征检测和垂直多行表情防刷屏。
+// @version      7.4
+// @description  使用本地正则规则判定并拉黑推特黄推和引流号，优化单字伪装表情刷屏检测，增强机器ID交叉验证。
 // @author       You
 // @match        *://x.com/*
 // @match        *://twitter.com/*
@@ -16,14 +16,13 @@
   // 全局配置与常量
   // --------------------------------------------------------
   const CONFIG = {
-    // Twitter Web 端通用的只读型 Bearer Token (用于前端 API 认证)
     BEARER_TOKEN: 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
-    MIN_BLOCK_DELAY: 800,  // 最小拉黑间隔(毫秒)，保护推特账号防 429
-    MAX_BLOCK_DELAY: 1500  // 最大拉黑间隔(毫秒)
+    MIN_BLOCK_DELAY: 800,
+    MAX_BLOCK_DELAY: 1500
   };
 
   // --------------------------------------------------------
-  // 1. 自定义 UI 系统 (轻量化 Toast 提示)
+  // 1. 自定义 UI 系统 
   // --------------------------------------------------------
   class ToastManager {
     constructor() {
@@ -69,7 +68,7 @@
   const Toaster = new ToastManager();
 
   // --------------------------------------------------------
-  // 2. 核心网络通信 (Twitter Block API)
+  // 2. 核心网络通信
   // --------------------------------------------------------
   class TwitterAPI {
     static getCookie(name) {
@@ -105,19 +104,18 @@
   }
 
   // --------------------------------------------------------
-  // 3. 本地判定规则引擎 (全面重构升级版)
+  // 3. 本地判定规则引擎
   // --------------------------------------------------------
   class LocalRuleEngine {
-    // 注意：这里新增了传入 screenName (即 @ 用户名) 参数
-    static isBot(displayName, screenName, textContent) {
+    static isBot(userNameContent, screenName, textContent) {
       const trimmedText = textContent.trim();
 
       // ==========================================
       // 规则 1：高危账号名称拦截
       // ==========================================
-      // 新增黑词：固炮、涩播、准时播等变异引流词
-      const nameSpamRegex = /(?:点(?:击)?|看)(?:主页|头像|置顶)|主页自取|进群选人|资源(?:入口)?|找炮友|固炮|约(?:炮|泡|萢|拍|p|P|见|妹)|破处|裸聊|福利姬|母狗|找主人|真实可靠|门槛|同城|全城|面付|外围|空降|品茶|修车|留[联连]系|原味|探花|楼凤|伴游|互粉|互关|互fo|fo back|秒回|赌场|澳门|娱乐城|百家乐|[加➕][Vv微威]|vx|威信|Q群|TG群|全国[1-9]线|附近(?:好友|真实)|无偿(?:线下|约)|处男(?:免费)?|免费破处|涩播|准时.*播/i;
-      if (nameSpamRegex.test(displayName)) {
+      // 直接测试包含名字和ID的完整元素文本，防止过长名字被DOM截断导致漏判
+      const nameSpamRegex = /(?:点(?:击)?|看)(?:主页|头像|置顶)|主页自取|进群选人|资源(?:入口)?|找炮友|固炮|约(?:炮|泡|萢|拍|跑|p|P|见|妹)|破处|裸聊|福利姬|母狗|找主人|真实可靠|门槛|同城|全城|面付|外围|空降|品茶|修车|留[联连]系|原味|探花|楼凤|伴游|互粉|互关|互fo|fo back|秒回|赌场|澳门|娱乐城|百家乐|[加➕][Vv微威]|vx|威信|Q群|TG群|全国[1-9]线|附近(?:好友|真实)|无偿(?:线下|约)|处男|免费破/i;
+      if (nameSpamRegex.test(userNameContent)) {
         return true;
       }
 
@@ -125,7 +123,7 @@
         // ==========================================
         // 规则 2：高危正文内容拦截
         // ==========================================
-        const textSpamRegex = /主页有惊喜|看我主页|看主页|看置顶|加[Vv微信]{1,2}看|门槛.*[红包|付费]|全网最[低全]|同城|全城|固炮|约(?:炮|泡|萢|拍|p|P)|裸聊|福利姬|涩播|🔞|💦/i;
+        const textSpamRegex = /主页有惊喜|看我主页|看主页|看置顶|加[Vv微信]{1,2}看|门槛.*[红包|付费]|全网最[低全]|同城|全城|固炮|约(?:炮|泡|萢|拍|跑|p|P)|裸聊|福利姬|涩播|🔞|💦/i;
         if (textSpamRegex.test(trimmedText)) {
           return true;
         }
@@ -143,50 +141,36 @@
         }
 
         // ==========================================
-        // 规则 4 & 5：无意义短文本 / 纯表情刷屏专杀
+        // 规则 4：单字伪装与多行表情刷屏综合检测
         // ==========================================
-        // 使用 \p{L} 匹配任意人类语言文字，防止机器人用非中英文字符(如假名、俄文)绕过
-        const hasAnyLetter = /[\p{L}]/u.test(trimmedText);
+        // 提取纯文字（去除非人类语言的符号、表情、标点、特殊空白）
+        const pureText = trimmedText.replace(/[\s\p{Z}\p{C}\p{M}\p{Extended_Pictographic}\p{Emoji_Presentation}\p{Emoji}\p{Symbol}\p{Punctuation}]/gu, '');
+        const hasEmoji = /[\p{Extended_Pictographic}\p{Emoji_Presentation}\p{Emoji}]/u.test(trimmedText);
 
-        if (!hasAnyLetter) {
-          // 如果一条回复里一个正常文字都没有（全是符号、表情或数字）
+        // 提取账号机器批量注册特征：较长的英文字母组合，结尾紧跟 4~8 位纯数字
+        const isBotHandlePattern = /[a-zA-Z]{5,}\d{4,8}$/.test(screenName);
 
-          // 1. 包含数字直接拉黑 (针对 💐2🌸)
+        // 如果正文里的“有效汉字/字母”极少 (<=2个)，说明它主要是在发符号或表情
+        if (pureText.length <= 2) {
+          // 情况 A: 包含数字 (如 🌹2🌸)
           if (/\d/.test(trimmedText)) return true;
 
-          // 2. 垂直多行表情占屏 (针对 🌈🌹\n\n🔥\n\n🦄)
-          const lines = trimmedText.split(/\n/);
+          // 情况 B: 垂直多行刷屏占位 (如 🔀\n🌼\n💜🈶\n💓)
+          const lines = trimmedText.split(/\r\n|\r|\n/);
           const nonEmptyLines = lines.filter(line => line.trim().length > 0).length;
-          // 如果跨越3行及以上，或存在2个及以上的独立内容行（正常人连发表情不会故意每发一个按一次回车）
-          if (lines.length >= 3 || nonEmptyLines >= 2) return true;
+          // 如果跨越3个非空行，或者总行数超过4行，且含有表情
+          if (hasEmoji && (lines.length >= 4 || nonEmptyLines >= 3)) return true;
 
-          // 3. 防修饰符变种 (剥离可视字符后为空)
-          const visibleOnly = trimmedText.replace(/[\s\p{Z}\p{C}\p{M}]/gu, '');
-          if (visibleOnly.length === 0) return true;
-
-        } else if (trimmedText.length <= 15) {
-          // ==========================================
-          // 规则 6：乱码+表情 防屏蔽变种 (如 "K 14 n 🌸")
-          // ==========================================
-          const hasEmojiAny = /[\p{Extended_Pictographic}\p{Emoji_Presentation}\p{Emoji}]/u.test(trimmedText);
-          if (hasEmojiAny) {
-            const pureText = trimmedText.replace(/[\s\p{Z}\p{C}\p{M}\p{Extended_Pictographic}\p{Emoji_Presentation}\p{Emoji}\p{Symbol}\p{Punctuation}]/gu, '');
-            const hasCJK = /[\u4e00-\u9fa5]/.test(pureText);
-            if (!hasCJK && pureText.length > 0 && pureText.length <= 4) {
-              return true;
-            }
-          }
+          // 情况 C: 机器账号特征交叉验证 (只要是批量ID，且没什么有效字数，直接拉黑)
+          if (isBotHandlePattern) return true;
         }
 
         // ==========================================
-        // 规则 7：机器批量注册 ID 特征交叉验证 (新必杀)
+        // 规则 5：乱码+表情 防屏蔽变种 (如 "K 14 n 🌸")
         // ==========================================
-        // 特征：Handle(ID) 为较长的英文字母组合，且结尾紧跟 4~6 位纯数字 (如 GarciaJose97449)
-        const isBotHandlePattern = /[a-zA-Z]{6,}\d{4,6}$/.test(screenName);
-        if (isBotHandlePattern) {
-          // 如果是这种机器批量特征账号，且回复里连一个正常文字都没有（或者极短），直接击杀
-          // 这能覆盖所有仅发单行单一表情绕过前面规则的批量账号
-          if (!hasAnyLetter) {
+        if (pureText.length > 0 && pureText.length <= 4) {
+          const hasCJK = /[\u4e00-\u9fa5]/.test(pureText);
+          if (!hasCJK && hasEmoji) {
             return true;
           }
         }
@@ -254,15 +238,14 @@
         if (!userElement) continue;
 
         const userNameContent = userElement.innerText;
-        const displayName = userNameContent.split('\n')[0] || "";
         const screenNameMatch = userNameContent.match(/@([a-zA-Z0-9_]+)/);
 
         if (!screenNameMatch) continue;
         const screenName = screenNameMatch[1];
         const textContent = textElement ? textElement.innerText : "";
 
-        // 将提取到的 screenName(即不带@的ID) 一并传给引擎进行批量号特征判定
-        if (LocalRuleEngine.isBot(displayName, screenName, textContent)) {
+        // 修改参数传递，将整个 userNameContent 传给规则引擎，防止 DOM 截断问题
+        if (LocalRuleEngine.isBot(userNameContent, screenName, textContent)) {
           tweet.style.transition = 'opacity 0.3s ease';
           tweet.style.opacity = '0';
           setTimeout(() => { tweet.style.display = 'none'; }, 300);
