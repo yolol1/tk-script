@@ -114,7 +114,7 @@
       // 规则 1：高危账号名称拦截
       // ==========================================
       // 直接测试包含名字和ID的完整元素文本，防止过长名字被DOM截断导致漏判
-      const nameSpamRegex = /(?:点(?:击)?|看)(?:主页|头像|置顶)|主页自取|进群选人|资源(?:入口)?|找炮友|固炮|约(?:炮|泡|萢|拍|跑|p|P|见|妹)|破处|裸聊|福利姬|母狗|找主人|真实可靠|门槛|同城|全城|面付|外围|空降|品茶|修车|留[联连]系|原味|探花|楼凤|伴游|互粉|互关|互fo|fo back|秒回|赌场|澳门|娱乐城|百家乐|[加➕][Vv微威]|vx|威信|Q群|TG群|全国[1-9]线|附近(?:好友|真实)|无偿(?:线下|约)|处男|免费破/i;
+      const nameSpamRegex = /(?:点(?:击)?|看)(?:主页|头像|置顶)|主页自取|进群选人|资源(?:入口)?|找炮友|固炮|约(?:炮|泡|萢|拍|跑|p|P|见|妹)|破处|裸聊|福利姬|母狗|找主人|真实可靠|门槛|同城|全城|面付|外围|空降|品茶|修车|留[联连]系|原味|探花|楼凤|伴游|互粉|互关|互fo|fo back|秒回|赌场|澳门|娱乐城|百家乐|[加➕][Vv微威]|vx|威信|Q群|TG群|全国[1-9]线|附近(?:好友|真实)|无偿|处男|chu男|免费破|24h/i;
       if (nameSpamRegex.test(userNameContent)) {
         return true;
       }
@@ -147,8 +147,8 @@
         const pureText = trimmedText.replace(/[\s\p{Z}\p{C}\p{M}\p{Extended_Pictographic}\p{Emoji_Presentation}\p{Emoji}\p{Symbol}\p{Punctuation}]/gu, '');
         const hasEmoji = /[\p{Extended_Pictographic}\p{Emoji_Presentation}\p{Emoji}]/u.test(trimmedText);
 
-        // 提取账号机器批量注册特征：较长的英文字母组合，结尾紧跟 4~8 位纯数字
-        const isBotHandlePattern = /[a-zA-Z]{5,}\d{4,8}$/.test(screenName);
+        // 提取账号机器批量注册特征：较长的英文字母/下划线组合，结尾紧跟 4~8 位纯数字
+        const isBotHandlePattern = /[a-zA-Z_]{5,}\d{4,8}$/.test(screenName);
 
         // 如果正文里的“有效汉字/字母”极少 (<=2个)，说明它主要是在发符号或表情
         if (pureText.length <= 2) {
@@ -185,9 +185,34 @@
   // --------------------------------------------------------
   class BotBlockerApp {
     constructor() {
-      this.blockQueue = [];
+      // 加载本地存储的队列，防止刷新页面导致未拉黑的任务丢失
+      this.blockQueue = this.loadQueue();
       this.isQueueRunning = false;
+
+      // 注入用于彻底隐藏元素的全局CSS
+      const style = document.createElement('style');
+      style.innerHTML = '.bot-blocker-hidden { display: none !important; }';
+      document.head.appendChild(style);
+
       this.initUI();
+
+      // 启动如果有遗留任务，继续执行
+      if (this.blockQueue.length > 0) this.processQueue();
+
+      // 改为全自动后台扫描，每 1.5 秒执行一次，不再需要用户手动点击
+      setInterval(() => this.scanAndAnalyze(), 1500);
+    }
+
+    loadQueue() {
+      try {
+        return JSON.parse(localStorage.getItem('botBlockQueue') || '[]');
+      } catch (e) {
+        return [];
+      }
+    }
+
+    saveQueue() {
+      localStorage.setItem('botBlockQueue', JSON.stringify(this.blockQueue));
     }
 
     sleep(ms) {
@@ -198,42 +223,29 @@
       if (this.isQueueRunning) return;
       this.isQueueRunning = true;
 
-      let blockedCount = 0;
-      const total = this.blockQueue.length;
-
       while (this.blockQueue.length > 0) {
-        this.updateMainButtonState('running', `拉黑执行中 (剩余 ${this.blockQueue.length})...`);
-        const handle = this.blockQueue.shift();
+        this.updateUI();
+        const handle = this.blockQueue[0];
 
-        const success = await TwitterAPI.blockUser(handle);
-        if (success) blockedCount++;
+        await TwitterAPI.blockUser(handle);
+
+        // 无论成功失败，尝试后即移出队列并保存状态
+        this.blockQueue.shift();
+        this.saveQueue();
 
         const delay = Math.floor(Math.random() * (CONFIG.MAX_BLOCK_DELAY - CONFIG.MIN_BLOCK_DELAY)) + CONFIG.MIN_BLOCK_DELAY;
         await this.sleep(delay);
       }
 
       this.isQueueRunning = false;
-      this.updateMainButtonState('idle', '🤖 本地规则扫描净化');
-      if (blockedCount > 0) {
-        Toaster.show(`拉黑队列执行完毕，成功屏蔽 ${blockedCount} 个账号`, 'success');
-      }
+      this.updateUI();
     }
 
     scanAndAnalyze() {
-      if (this.isQueueRunning) {
-        Toaster.show('拉黑任务正在执行中，请稍后...', 'warning');
-        return;
-      }
-
-      this.updateMainButtonState('running', '高速正则匹配中...');
-
-      const tweets = document.querySelectorAll('article[data-testid="tweet"]:not([data-bot-checked])');
-      let foundBotsCount = 0;
+      const tweets = document.querySelectorAll('article[data-testid="tweet"]');
+      let newlyFoundCount = 0;
 
       for (let tweet of tweets) {
-        tweet.setAttribute('data-bot-checked', 'true');
-
-        const textElement = tweet.querySelector('[data-testid="tweetText"]');
         const userElement = tweet.querySelector('[data-testid="User-Name"]');
         if (!userElement) continue;
 
@@ -242,41 +254,44 @@
 
         if (!screenNameMatch) continue;
         const screenName = screenNameMatch[1];
+        const textElement = tweet.querySelector('[data-testid="tweetText"]');
         const textContent = textElement ? textElement.innerText : "";
 
-        // 修改参数传递，将整个 userNameContent 传给规则引擎，防止 DOM 截断问题
+        // 生成推文特征码，防止 Twitter 的 React 虚拟列表复用 DOM 节点导致判定失效
+        const signature = screenName + "|" + textContent.length;
+        if (tweet.dataset.botSignature === signature) continue;
+
+        tweet.dataset.botSignature = signature;
+
+        // 每次重新评估新的节点时，先移除隐藏类，防止正常推文被复用隐藏
+        tweet.classList.remove('bot-blocker-hidden');
+
         if (LocalRuleEngine.isBot(userNameContent, screenName, textContent)) {
-          tweet.style.transition = 'opacity 0.3s ease';
-          tweet.style.opacity = '0';
-          setTimeout(() => { tweet.style.display = 'none'; }, 300);
+          tweet.classList.add('bot-blocker-hidden');
 
           if (!this.blockQueue.includes(screenName)) {
             this.blockQueue.push(screenName);
-            foundBotsCount++;
+            this.saveQueue();
+            newlyFoundCount++;
           }
         }
       }
 
-      if (foundBotsCount > 0) {
-        Toaster.show(`规则命中！发现 ${foundBotsCount} 个机器人，开始拉黑...`, 'warning');
+      if (newlyFoundCount > 0) {
         this.processQueue();
-      } else {
-        Toaster.show('当前页面未命中任何机器人规则', 'info');
-        this.updateMainButtonState('idle', '🤖 本地规则扫描净化');
       }
     }
 
-    updateMainButtonState(state, text) {
+    updateUI() {
       if (!this.mainBtn) return;
-      this.mainBtn.innerText = text;
-      if (state === 'idle') {
-        this.mainBtn.style.background = '#f4212e';
-        this.mainBtn.style.cursor = 'pointer';
-        this.mainBtn.style.opacity = '1';
-      } else if (state === 'running') {
+      if (this.blockQueue.length > 0) {
+        this.mainBtn.innerText = `🤖 自动清理中... (队列: ${this.blockQueue.length})`;
         this.mainBtn.style.background = '#e0245e';
         this.mainBtn.style.cursor = 'wait';
-        this.mainBtn.style.opacity = '0.8';
+      } else {
+        this.mainBtn.innerText = '🤖 纯本地净化运行中';
+        this.mainBtn.style.background = '#00ba7c';
+        this.mainBtn.style.cursor = 'default';
       }
     }
 
@@ -294,16 +309,12 @@
             `;
 
       this.mainBtn = document.createElement('button');
-      this.updateMainButtonState('idle', '🤖 本地规则扫描净化');
+      this.updateUI();
       this.mainBtn.style.cssText = `
                 padding: 12px 24px; color: white; border: none; border-radius: 9999px;
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto;
                 font-size: 15px; font-weight: 700; transition: all 0.2s ease;
             `;
-
-      this.mainBtn.onmouseover = () => { if (this.mainBtn.style.cursor === 'pointer') this.mainBtn.style.transform = 'scale(1.02)'; };
-      this.mainBtn.onmouseout = () => { this.mainBtn.style.transform = 'scale(1)'; };
-      this.mainBtn.onclick = () => this.scanAndAnalyze();
 
       container.appendChild(this.mainBtn);
       document.body.appendChild(container);
